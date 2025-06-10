@@ -5,10 +5,7 @@ import org.example.mfapi.dto.ModelDTO;
 import org.example.mfapi.dto.SetupDTO;
 import org.example.mfapi.service.MfService;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.utfpr.mf.markdown.MarkdownContent;
 import org.utfpr.mf.migration.params.GeneratedJavaCode;
@@ -40,10 +37,16 @@ public class MainController {
         return ResponseEntity.ok(mfService.generateCode(modelDTO));
     }
 
-    @PostMapping(path = "/migrate")
-    public SseEmitter migrate(@RequestBody MigrateDTO migrateDTO) {
+    @PostMapping("/migrate")
+    public ResponseEntity<Void> migrate(@RequestBody MigrateDTO migrateDTO) {
+        mfService.setupMigration(migrateDTO.getGeneratedJavaCode(), migrateDTO.getCredentials());
+        return ResponseEntity.ok().build();
+    }
+
+    @GetMapping(path = "/migrate-events")
+    public SseEmitter migrate_events() {
         SseEmitter sseEmitter = new SseEmitter(Long.MAX_VALUE);
-        mfService.migrateDatabase(sseEmitter, migrateDTO.getGeneratedJavaCode(), migrateDTO.getCredentials());
+        mfService.migrateDatabase(sseEmitter);
         return sseEmitter;
     }
 

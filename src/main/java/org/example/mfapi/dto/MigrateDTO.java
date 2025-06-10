@@ -11,7 +11,7 @@ import org.utfpr.mf.mongoConnection.MongoConnectionCredentials;
 @NoArgsConstructor
 public class MigrateDTO {
 
-    GeneratedJavaCode generatedJavaCode;
+    JavaCodeDto generatedJavaCode;
     MongoConnectionCredentials credentials;
 
 }

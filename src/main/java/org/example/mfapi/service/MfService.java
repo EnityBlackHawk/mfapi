@@ -1,5 +1,6 @@
 package org.example.mfapi.service;
 
+import org.example.mfapi.dto.JavaCodeDto;
 import org.example.mfapi.dto.ModelDTO;
 import org.example.mfapi.dto.SetupDTO;
 import org.example.mfapi.exception.MfException;
@@ -26,18 +27,23 @@ import org.utfpr.mf.stream.CombinedPrintStream;
 import org.utfpr.mf.stream.MfPrintStream;
 import org.utfpr.mf.stream.StringPrintStream;
 import org.utfpr.mf.stream.SystemPrintStream;
+import org.utfpr.mf.tools.UpdateType;
 import org.yaml.snakeyaml.error.Mark;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class MfService {
 
+    private final UtilsService utilsService;
     private MfPrintStream<String> printStream = new CombinedPrintStream(new StringPrintStream(), new SystemPrintStream());
     private MfMigrationStepFactory factory = new MfMigrationStepFactory(printStream);
     private MfMigrator.Binder binder = new MfMigrator.Binder();
+    private GeneratedJavaCode generatedJavaCode = null;
     private MfMigrator migrator;
+    private ReentrantLock lock = new ReentrantLock();
 
     private IMfStepObserver observer = new IMfStepObserver() {
         @Override
@@ -59,6 +65,10 @@ public class MfService {
             return false;
         }
     };
+
+    public MfService(UtilsService utilsService) {
+        this.utilsService = utilsService;
+    }
 
     public MetadataInfo setup(SetupDTO dto) {
 
@@ -82,7 +92,7 @@ public class MfService {
         desc.llmServiceDesc.llm_key = dto.getLlm().getApiKey();
         desc.llmServiceDesc.temp = 1;
         desc.llmServiceDesc.model = dto.getLlm().getModel();
-        desc.llmServiceDesc.cachePolicy = CachePolicy.DEFAULT;
+        desc.llmServiceDesc.cachePolicy = CachePolicy.CACHE_ONLY;
         desc.llmServiceDesc.cacheDir = "cache";
 
         migrator = new MfMigrator(desc);
@@ -133,17 +143,28 @@ public class MfService {
         return (GeneratedJavaCode) migrator.execute(model);
     }
 
-    public static MongoConnection createMongoConnection(MongoConnectionCredentials credentials) {
-        return new MongoConnection(credentials);
-    }
-
-    public void migrateDatabase(SseEmitter sse, GeneratedJavaCode generatedJavaCode, MongoConnectionCredentials credentials) {
+    public void setupMigration(JavaCodeDto generatedJavaCode, MongoConnectionCredentials credentials) {
         if(migrator == null) {
             throw new IllegalStateException("Migrator is not initialized. Call setup() first.");
         }
-        var conn = createMongoConnection(credentials);
+
+        var conn = utilsService.createMongoConnection(credentials);
         conn.clearAll();
         binder.bind(DefaultInjectParams.MONGO_CONNECTION, conn);
+
+        this.generatedJavaCode = GeneratedJavaCode.builder().code(generatedJavaCode.getCode()).tokens_used(0).build();
+
+    }
+
+    public void migrateDatabase(SseEmitter sse) {
+
+        if(migrator == null) {
+            throw new IllegalStateException("Migrator is not initialized. Call setup() first.");
+        }
+
+        if(generatedJavaCode == null) {
+            throw new IllegalStateException("Generated Java Code is not initialized. Call setupMigration() first.");
+        }
 
         IMfStepObserver observerMigration = new IMfStepObserver() {
             @Override
@@ -171,43 +192,53 @@ public class MfService {
                 try {
                     sse.send(message);
                 } catch (IOException e) {
+                    lock.unlock();
                     throw new RuntimeException(e);
                 }
                 return true;
             }
         };
 
-        IMfMigrationStep step = factory.createMigrateDatabaseStep(observer, observerMigration);
-        IMfMigrationStep step2 = factory.createGenerateReportStep(observer);
-        migrator.clearSteps();
-        migrator.addStep(step);
-        migrator.addStep(step2);
-        migrator.executeAsync(generatedJavaCode)
-                .catching(
-                        e -> {
+        new Thread(() -> {
 
-                            try {
-                                sse.send("Error: " + e.getMessage());
-                                sse.complete();
-                            } catch (IOException ioException) {
-                                throw new RuntimeException(ioException);
-                            }
-
-                            return null;
-                        }
-                )
-                .then(
-            result -> {
-                try {
-                    sse.send(((MarkdownContent)result).get());
-                    sse.complete();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                return null;
+            if(!lock.tryLock()) {
+                sse.complete();
+                return;
             }
-        );
+
+            IMfMigrationStep step = factory.createMigrateDatabaseStep(observer, observerMigration);
+            IMfMigrationStep step2 = factory.createGenerateReportStep(observer);
+            migrator.clearSteps();
+            migrator.addStep(step);
+            migrator.addStep(step2);
+
+
+            migrator.executeAsync(generatedJavaCode)
+                    .catching(
+                            e -> {
+
+                                try {
+                                    sse.send(new UpdateType("error", "Error: " + e.getMessage()));
+                                    sse.complete();
+                                } catch (IOException ioException) {
+                                    throw new RuntimeException(ioException);
+                                }
+
+                                return null;
+                            }
+                    )
+                    .then(
+                            result -> {
+                                try {
+                                    sse.send( new UpdateType( "report", ((MarkdownContent)result).get()));
+                                    sse.complete();
+                                } catch (IOException e) {
+                                    throw new RuntimeException(e);
+                                }
+                                return null;
+                            }
+                    ).await();
+            lock.unlock();
+        }).start();
     }
-
-
 }
